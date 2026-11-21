@@ -16,7 +16,8 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage
 from .database import package
 from .feature_codec import parse_feature as decode_feature
-from .face_detector import auto_hand_controller, mtcnn, resnet, device, run_liveness
+from .matching import match_feature, face_threshold
+from .face_detector import auto_hand_controller, mtcnn, resnet, device, run_liveness, get_base_dir
 from .camera import camera_process
 
 DEBUG_MATCH = False
@@ -204,6 +205,15 @@ class FaceDetectionThread(QThread):
         self.interval = 3.0
         self.retry_count = 0
         self.liveness_timeout = 10.0
+        #: 失败状态每轮都会重复出现，审计按时间节流，避免把日志表刷爆
+        self._last_liveness_log = 0.0
+        self._last_mismatch_log = 0.0
+
+    def _audit(self, message):
+        try:
+            package().insertdatalog(message, self.current_user or "System")
+        except Exception as e:
+            print(f"[检测线程] 审计写入失败: {e}")
 
     def run(self):
         pkg = package()
@@ -232,6 +242,10 @@ class FaceDetectionThread(QThread):
                 self.retry_count = 0
                 matched_user = self.match_current_user(pkg, userface)
                 if not matched_user:
+                    now = time.time()
+                    if now - self._last_mismatch_log > 60:
+                        self._last_mismatch_log = now
+                        self._audit(f"人脸不匹配：{self.current_user} 验证失败")
                     self.status_signal.emit("❌ 人脸不匹配，请重试", "color: #ff6b6b;")
                     time.sleep(self.interval)
                     continue
@@ -241,12 +255,17 @@ class FaceDetectionThread(QThread):
                 self.status_signal.emit(f"✅ 身份匹配：{matched_user}，请完成活体检测", "color: #4a9eff;")
                 if not run_liveness(self.camera, prompt=self._liveness_prompt,
                                     timeout=self.liveness_timeout):
+                    now = time.time()
+                    if now - self._last_liveness_log > 30:
+                        self._last_liveness_log = now
+                        self._audit(f"活体拦截：{self.current_user} 未完成动作挑战")
                     self.status_signal.emit("❌ 活体检测未通过：照片/视频做不出指定动作",
                                             "color: #ff6b6b;")
                     self.retry_count += 1
                     time.sleep(self.interval)
                     continue
 
+                self._audit(f"人脸解锁成功：{matched_user}")
                 self.status_signal.emit(f"✅ 活体通过：{matched_user}，正在解锁...", "color: #51cf66;")
                 self.result_signal.emit(matched_user, True)
                 break
@@ -273,36 +292,16 @@ class FaceDetectionThread(QThread):
     def match_current_user(self, pkg, feature):
         if self.current_user is None:
             return None
-        try:
-            sql = "SELECT userfaceinfo FROM userinfo WHERE username = %s AND userfaceinfo IS NOT NULL"
-            pkg.cursor.execute(sql, (self.current_user,))
-            result = pkg.cursor.fetchone()
-        except:
-            return None
-        if not result:
+        stored_text = pkg.get_face_feature(self.current_user)
+        if not stored_text:
             return None
 
-        stored_feat = self.parse_feature(result['userfaceinfo'])
-        if stored_feat is None:
-            print(f"[匹配调试] 无法解析当前用户 {self.current_user} 的特征数据")
+        sim, passed = match_feature(stored_text, feature)
+        if sim is None:
+            print(f"[匹配调试] 当前用户 {self.current_user} 的特征格式或维度异常，拒绝解锁")
             return None
-
-        feature = feature / (np.linalg.norm(feature) + 1e-6)
-        feature_len = feature.size
-
-        if stored_feat.size > feature_len:
-            stored_feat = stored_feat[:feature_len]
-        elif stored_feat.size < feature_len:
-            print(f"[匹配调试] 当前用户特征维度 {stored_feat.size} < {feature_len}，不匹配")
-            return None
-
-        stored_feat = stored_feat / (np.linalg.norm(stored_feat) + 1e-6)
-        sim = np.dot(feature, stored_feat)
-        print(f"[匹配调试] 当前用户 {self.current_user}, 相似度: {sim:.4f}, 阈值: 0.6")
-
-        if sim > 0.6:
-            return self.current_user
-        return None
+        print(f"[匹配调试] 当前用户 {self.current_user}, 相似度: {sim:.4f}, 阈值: {face_threshold()}")
+        return self.current_user if passed else None
 
     def stop(self):
         self.running = False
@@ -338,7 +337,8 @@ class Lockscreen(QWidget):
         self.yolov8 = None
         self.yolotimer = None
         try:
-            self.yolov8 = YOLO('yolov8n.pt')
+            # 用绝对路径：打包后工作目录不一定是 exe 所在目录
+            self.yolov8 = YOLO(os.path.join(get_base_dir(), 'yolov8n.pt'))
             self.stranger_count = 0
             self.stranger_threshold = 5
             self.yolotimer = QTimer(self)
@@ -540,30 +540,13 @@ class Lockscreen(QWidget):
     def match_current_user_static(self, pkg, feature):
         if self.current_user is None:
             return None
-        try:
-            sql = "SELECT userfaceinfo FROM userinfo WHERE username = %s AND userfaceinfo IS NOT NULL"
-            pkg.cursor.execute(sql, (self.current_user,))
-            result = pkg.cursor.fetchone()
-        except:
-            return None
-        if not result:
+        stored_text = pkg.get_face_feature(self.current_user)
+        if not stored_text:
             return None
 
-        stored_feat = self.parse_feature(result['userfaceinfo'])
-        if stored_feat is None:
-            return None
-
-        feature = feature / (np.linalg.norm(feature) + 1e-6)
-        feature_len = feature.size
-        if stored_feat.size > feature_len:
-            stored_feat = stored_feat[:feature_len]
-        elif stored_feat.size < feature_len:
-            return None
-
-        stored_feat = stored_feat / (np.linalg.norm(stored_feat) + 1e-6)
-        sim = np.dot(feature, stored_feat)
-        print(f"[静态匹配] 当前用户 {self.current_user}, 相似度: {sim:.4f}")
-        return sim > 0.6
+        sim, passed = match_feature(stored_text, feature)
+        print(f"[静态匹配] 当前用户 {self.current_user}, 相似度: {sim}")
+        return passed
 
     def parse_feature(self, feat_str):
         """委托给统一编解码器：只解析数据，绝不执行数据库里的内容。

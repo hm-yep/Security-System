@@ -61,6 +61,20 @@ def serialize_feature(feature) -> str:
     return json.dumps(arr.tolist())
 
 
+def serialize_template(feature, bits: int = 512) -> str:
+    """注册时写库：生成可撤销模板（v2 JSON），而不是原始 512 维特征。"""
+    from .template_protection import enroll_template
+
+    return enroll_template(feature, bits=bits)
+
+
+def parse_template(text):
+    """解析 v2 可撤销模板；不是 v2 格式返回 None，交给 parse_feature 走旧路径。"""
+    from .template_protection import decode_template
+
+    return decode_template(text)
+
+
 def parse_feature(text, expected_dim: int | None = None) -> np.ndarray | None:
     """把库里的特征字符串还原成 float32 向量；格式不认识就返回 None。"""
     if text is None:

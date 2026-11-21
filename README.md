@@ -1,82 +1,279 @@
-# Security System · 基于人脸与活体检测的 Windows 桌面安防系统
+# 人脸安防终端（Face Security Terminal）
 
-一个端到端的单机桌面应用：摄像头采集 → 人脸检测与 512 维特征比对 → 四步随机活体挑战 → 自动锁屏 / 解锁，配套注册登录、审计日志、开机自启与系统托盘。
+人脸识别登录与刷脸解锁 + 四步随机活体检测 + 工作站锁屏防护。
+面向桌面终端的身份认证场景：注册、登录、空闲自动锁屏、陌生人停留告警与审计追溯。
 
-> 定位说明：这是一个**工程实现型**项目，重点是多线程、CPU 推理性能调优、Windows 系统层交互与端到端闭环；模型均为成熟预训练模型，未做训练或微调。
+> 定位：**工程实现型**人脸安防项目。重点不在"调一个识别模型"，而在把识别链路做成
+> 可解释、可复现的终端安全能力：人脸质量门控、多帧特征融合、分步活体挑战、
+> 锁屏期间的键鼠拦截、完整的审计日志。
+
+## 直接下载使用（免安装）
+
+让别人「下载就能用」，靠的是 **GitHub Releases 里的打包产物**，而不是源码：
+对方不用装 Python、PyTorch、MySQL。
+
+1. 打开仓库的 **Releases** 页面，下载 `FaceSecurityTerminal-windows-x64.zip`
+2. 解压到任意目录（中英文路径都可以）
+3. 双击 `FaceSecurityTerminal.exe`
+
+运行条件与行为：
+
+- Windows 10/11 x64，需要摄像头（笔记本内置即可）
+- 打包版默认用 **SQLite**，首次启动自动在
+  `%APPDATA%\SecuritySystem\security.db` 建库；账号、人脸模板、审计日志都留在本机，不联网
+- 未签名的 exe 首次运行会触发 SmartScreen：点「更多信息」→「仍要运行」
+- 卸载 = 删除解压目录，再删 `%APPDATA%\SecuritySystem`（会一并清空账号数据）
+
+> 注意：PyQt5 是 GPL、Ultralytics YOLOv8 是 AGPL。仓库公开 + 随发布包提供源码，
+> 一般可以直接分发；如果要做闭源商业分发，需要换成 PySide6 并替换/购买 YOLO 授权。
 
 ## 功能
 
-- 注册 / 登录 / 改密 / 注销、人脸录入与更换、账户切换
-- 四步随机顺序活体检测（眨眼、张嘴、正脸、微动），全部通过才放行
-- 空闲检测自动锁屏、陌生人停留告警、Windows API 系统锁屏兜底
-- 锁屏期间低级键鼠钩子拦截（Win / Alt+Tab / Alt+F4 / Ctrl+Esc 等）
-- 审计日志查询界面、注册表开机自启、系统托盘常驻
+### 人脸识别链路
+
+- **检测与特征**：MTCNN 检测 + InceptionResnetV1（VGGFace2）提取 512 维特征，
+  MediaPipe FaceLandmarker 提供 478 点关键点
+- **质量门控**（`mods/face_quality.py`）：清晰度（Laplacian 方差）、亮度、对比度、
+  yaw/roll 姿态、人脸占比五项打分，不合格的帧不参与注册与登录
+- **多帧融合**：连续采集多帧通过质量门控的特征，逐条 L2 归一化后取**中位数**再归一化，
+  降低单帧噪声与偶发坏帧的影响
+- **比对**：余弦相似度 + 严格 512 维校验，阈值可由 `SECURITY_FACE_THRESHOLD` 覆盖
+
+### 活体与终端防护
+
+- 四步随机顺序活体：眨眼、张嘴、正脸、微动，顺序每轮打乱，四项全过才放行
+- 空闲检测自动锁屏、陌生人在岗停留告警（YOLOv8 人体检测 + 人脸比对）
+- Windows `LockWorkStation` 系统锁屏兜底
+- 锁屏期间低级键鼠钩子拦截 Win / Alt+Tab / Alt+F4 / Ctrl+Esc 与全部鼠标消息
+- 审计日志：登录、解锁成功、活体拦截、人脸不匹配、陌生人告警、改密、注销等
+- 主界面安全看板：今日人脸解锁、活体拦截、陌生人告警次数
+- 注册表开机自启、系统托盘常驻、账户切换与注销
 
 ## 模块结构
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.py` | 入口，按 `--auto` 选择手动界面或锁屏 |
-| `mods/face_detector.py` | MTCNN + InceptionResnetV1 提特征、MediaPipe 478 点、EAR/MAR/姿态/微动判据、P 核绑定 |
-| `mods/auto_ui.py` | 锁屏窗口、QThread 检测线程、InputGuard 键鼠钩子、YOLOv8 人体检测与陌生人告警 |
-| `mods/hand_ui.py` | 登录/注册/主界面、托盘、空闲检测、日志界面 |
-| `mods/database.py` | MySQL 数据访问层、口令哈希与渐进迁移、审计日志、在线状态 |
-| `mods/feature_codec.py` | 512 维特征的序列化与只读解析 |
+| `mods/face_detector.py` | MTCNN + ResNet 特征、质量门控接入、多帧融合采集、MediaPipe 关键点、活体判据、P 核绑定 |
+| `mods/face_quality.py` | 单帧人脸质量评分与多帧特征融合（纯 OpenCV + NumPy） |
+| `mods/auto_ui.py` | 锁屏窗口、QThread 检测线程、活体执行、InputGuard 键鼠钩子、陌生人告警、解锁审计 |
+| `mods/hand_ui.py` | 登录/注册/主界面、安全看板、托盘、空闲锁屏、日志界面 |
+| `mods/database.py` | 数据访问层（MySQL / SQLite 双后端）、口令哈希与渐进迁移、审计日志、今日安全统计 |
+| `build_release.py` | PyInstaller 免安装打包 + zip，供 GitHub Release 上传 |
+| `mods/matching.py` | 512 维特征相似度、维度校验与阈值 |
+| `mods/face_eval.py` | FAR/FRR 阈值扫描、EER、ROC AUC（纯 NumPy） |
+| `eval_face.py` | 验证指标评估与质量门控/多帧融合消融（LFW 或本地目录） |
+| `mods/template_protection.py` | 可撤销模板：随机投影 + 符号量化，支持吊销与跨系统不可关联 |
+| `mods/feature_codec.py` | 特征序列化与只读解析（v1 原始特征 / v2 受保护模板） |
+| `mods/camera.py` | 摄像头单例、后台读帧线程、帧锁 |
 | `mods/security.py` | PBKDF2-HMAC-SHA256 口令哈希 |
 | `mods/config.py` | 环境变量 / `.env` 配置读取 |
-| `mods/camera.py` | 摄像头单例、后台读帧线程、帧锁 |
-| `mods/startup_manager.py` | 注册表自启项管理 |
-| `verify_claims.py` | 无摄像头注入式自检，逐条验收功能声明 |
-| `bench_cpu_latency.py` | CPU 单帧推理耗时实测（最快/中位/均值/P95） |
-| `tests/` | 安全与编解码回归测试（不需要摄像头和数据库） |
+| `mods/ui_icons.py` | 内联 SVG 矢量线条图标（QSvgRenderer 渲染，无图片资源） |
+| `tests/` | 质量门控、融合、匹配、安全、编解码与功能声明回归 |
 
 ## 快速开始
 
-环境：Windows + Python 3.10~3.13 + 本机 MySQL + 可用摄像头。`mediapipe` 对较新的 Python 版本可能没有预编译包，遇到安装问题建议用 3.10/3.11。
+环境：Windows + Python 3.10~3.13，需要摄像头与随仓库附带的模型权重。
+数据库默认 MySQL（`.env` 里配置）；也可以设 `SECURITY_DB_BACKEND=sqlite` 免装 MySQL，
+库文件位置由 `SECURITY_DB_PATH` 指定（默认 `%APPDATA%\SecuritySystem\security.db`）。
 
 ```bash
 pip install -r requirements.txt
-pip install -r requirements-dev.txt   # 只需跑测试时
-cp .env.example .env                 # Windows: copy .env.example .env
+pip install -r requirements-dev.txt   # 跑测试时
 ```
-
-在 `.env` 里填写本机数据库口令（该文件已被 `.gitignore` 排除，不要提交）。先建库，表由程序启动时自建：
-
-```sql
-CREATE DATABASE IF NOT EXISTS Security_System_Users_DataBase
-  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-模型文件放在项目根目录（仓库已包含）：`yolov8n.pt`、`face_landmarker.task`、`facenet_pytorch_data/{pnet,rnet,onet}.pt`。MediaPipe 不认中文路径，程序会自动把模型复制到纯 ASCII 临时目录再加载。
 
 ```bash
 python main.py            # 手动登录界面
 python main.py --auto     # 直接进入锁屏（开机自启用的就是这个）
 ```
 
-验证：
+### 量化评估
 
 ```bash
-pytest -q tests/                 # 安全与编解码回归，不需要摄像头/数据库/模型
-python verify_claims.py          # 逐条验收功能声明（会短暂安装并摘除键鼠钩子）
-python bench_cpu_latency.py      # CPU 单帧推理基准，口径 640x480
+# LFW：40 个身份 × 10 张，首次运行自动下载（约 200 MB）
+python eval_face.py --lfw --people 40 --max-per-person 10 --enroll 4
+
+# 自己的数据：<root>/<person>/*.jpg，每人至少 5 张
+python eval_face.py --data-dir D:/faces --enroll 4
+
+# 额外评估可撤销模板：精度、吊销有效性、跨系统不可关联
+python eval_face.py --lfw --people 40 --enroll 4 --protect
 ```
+
+默认强制 CPU：LFW 小图逐张走 CUDA 的同步开销比 CPU 慢一个数量级，
+需要 GPU 时加 `--use-gpu`。指标写入 `reports/face_eval.json`。
+
+数据库建库语句（表由程序启动时自建）：
+
+```sql
+CREATE DATABASE IF NOT EXISTS Security_System_Users_DataBase
+  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+### 测试与验收
+
+```bash
+pytest -q tests/
+python verify_claims.py          # 功能声明逐条验收（会短暂安装键鼠钩子）
+python bench_cpu_latency.py      # 人脸特征提取 CPU 单帧基准
+```
+
+## 打包发布（生成别人能直接用的 zip）
+
+```bash
+pip install pyinstaller
+# 可选：换成 CPU 版 torch，包体积小很多（CUDA 版会带上数 GB 运行库）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+python build_release.py
+```
+
+产物：
+
+- `dist/FaceSecurityTerminal/`：免安装目录，双击里面的 exe 就能跑
+- `dist/FaceSecurityTerminal-windows-x64.zip`：直接上传到 GitHub Release 的附件
+
+发布步骤：
+
+1. 仓库右侧 **Releases → Draft a new release**，填 tag（如 `v1.0.0`）
+2. 把 zip 拖进附件区，写一句「下载后解压，双击 exe」
+3. Publish 后把 Release 链接发给对方即可
+
+> GitHub 单个 Release 附件上限 2 GB。CUDA 版 torch 很容易超过这个体积，
+> 通用分发请务必用上面的 CPU 版命令重装 torch 再打包。
+
+打包版的行为差异：`sys.frozen` 为真时默认 `SECURITY_DB_BACKEND=sqlite`，
+所以下载者不需要 MySQL；想让它连 MySQL，就在 exe 同目录放一个 `.env` 并写
+`SECURITY_DB_BACKEND=mysql` 与连接信息。
+
+## 人脸质量门控阈值
+
+`mods/face_quality.py` 中的硬门槛（任一不满足即丢弃该帧）：
+
+| 项 | 阈值 | 说明 |
+| --- | --- | --- |
+| 清晰度 | Laplacian 方差 ≥ 15 | 在 160×160 对齐人脸上计算，低于此基本是运动模糊/失焦 |
+| 亮度 | 灰度均值 45 ~ 215 | 过暗与过曝都拒绝 |
+| 对比度 | 灰度标准差 ≥ 15 | 逆光、雾面画面 |
+| yaw | ≤ 30 | 与活体正脸判据同一套 0~60 标尺 |
+| roll | ≤ 22° | 双眼连线倾角 |
+| 人脸占比 | ≥ 画面 1.5% | 约 640×480 下的 68×68 像素，再小就离镜头太远 |
+| 综合分 | ≥ 0.45 | 五项加权 |
+
+注册与登录默认采集 8 帧有效人脸（至少 4 帧）后融合；注册额外要求 yaw ≤ 20、
+roll ≤ 15 的正脸条件。
+
+## 实测指标（LFW）
+
+协议：LFW 随机抽 40 个身份 × 10 张图；每人 4 张注册、其余做探针。正例为
+「探针 vs 本人模板」，负例为「探针 vs 其余 39 个模板」，种子 42。
+
+| 配置 | EER | AUC | EER 阈值 | 拒识率 | 端到端 FRR |
+| --- | --- | --- | --- | --- | --- |
+| 单帧模板 + 无质量门控 | 4.51% | 0.9911 | 0.34 | 0% | 4.66% |
+| 融合模板 + 无质量门控 | 1.75% | 0.9979 | 0.41 | 0% | 1.69% |
+| 融合模板 + 质量门控 | 1.99% | 0.9978 | 0.41 | 1.27% | 3.39% |
+
+线上阈值 0.6（更保守）下：
+
+| 配置 | FAR | FRR |
+| --- | --- | --- |
+| 单帧模板 | 0.15% | 20.34% |
+| 融合模板 | 0.22% | 5.08% |
+| 融合模板 + 质量门控 | 0.22% | 4.72% |
+
+退化探针（阈值 0.41，60 张探针；模糊核按画面长边 4% 估计）：
+
+| 退化 | 质量门控 | 拒识率 | 本人失败率 | 冒名放行率 |
+| --- | --- | --- | --- | --- |
+| 模糊 | 开 | 56.67% | 56.67% | 1.08% |
+| 模糊 | 关 | 0% | 0% | 1.79% |
+| 暗光 | 开 | 81.67% | 81.67% | 0.93% |
+| 暗光 | 关 | 0% | 0% | 1.62% |
+| 倾斜 20° | 开 | 38.33% | 38.33% | 1.59% |
+| 倾斜 20° | 关 | 3.33% | 3.33% | 1.64% |
+
+结论（按上面的数据说，不夸大）：
+
+- **多帧融合是明确收益**：EER 4.51% → 1.75%，0.6 阈值下 FRR 20.3% → 5.1%，
+  FAR 基本不变。多花几帧的采集时间换来了可用性。
+- **质量门控不是免费提分**：LFW 是紧凑裁剪的干净人脸，FaceNet 对轻度退化也稳，
+  所以门控在干净数据上只带来 1.27% 的额外拒识。它的价值在真实摄像头的脏帧上：
+  退化帧被挡在比对之外，冒名放行率从 1.6~1.8% 降到约 1%，代价是用户要重新
+  对准或补光。这是一个明确的可用性/安全性权衡，不是"加了就一定更好"。
+- **0.6 是偏安全侧的阈值**：LFW 上 FAR 0.22%、FRR 5.08%；EER 阈值 0.41 更均衡，
+  但线上保留 0.6，把误放行的成本放在误拒绝之前。
+
+> LFW 不等于摄像头实拍分布，以上数字用于同一协议下的相对比较；绝对值请用
+> `--data-dir` 在自己的数据上重跑。
+
+## 可撤销模板（隐私保护）
+
+注册时不再把原始 512 维特征写库，而是用每个用户独立的随机种子做一次随机投影 +
+符号量化，库里只存 512 bit 的二进制模板（`{"v":2,...}`）。比对时用模板自带种子
+把探针投影过去，算位置一致率；线上阈值由 `SECURITY_TEMPLATE_THRESHOLD` 控制
+（默认 0.60）。旧版的原始特征 JSON 继续走余弦，互不影响。
+
+同一协议（LFW 40 人 × 10 张，4 张注册）下的实测：
+
+| 项目 | 结果 |
+| --- | --- |
+| 受保护模板 EER | 0.40% |
+| AUC | 0.9999 |
+| 固定阈值 0.60 | FAR 0.00% / FRR 1.29% / 端到端 FRR 1.69% |
+| 吊销（换种子重新签发） | 平均一致率 0.4993，最高 0.5547，0 个仍被放行 |
+| 跨系统不可关联（不同种子） | 平均一致率 0.5027，最高 0.5527 |
+
+- **精度没有变差，原因是量化起了正则化作用**：0.40% 比未保护的 1.99% 还低。
+  这只是该协议、该阈值下的结果，不能推广成「加密后更准」；它说明保护模板的
+  精度代价在这套数据上可以忽略，但不代表换数据集仍然更好。
+- **吊销是真实生效的**：换种子后旧模板与本人新模板的一致率回落到 0.5 附近，
+  旧模板泄露也无法再通过验证；重新注册就是一次吊销。
+- **跨系统不可关联**：两套系统各自持有模板时，同一个人的模板相互比对只有
+  0.5 左右，无法用来把两个系统里的同一人串起来。
+
+诚实边界（必须明确）：
+
+- **不防库内反演**。种子和模板现在存在同一个 `userfaceinfo` 字段里，攻击者同时
+  拿到两者仍可重建近似特征。生产部署应把种子放进 TPM / DPAPI / 独立密钥服务，
+  库里只保留模板；本项目为了不改表结构，暂未做到这一步。
+- 受保护模板不可逆，但不是「零信息」：它仍然可以被用来做穷举比对。
+- 生物特征模板一旦泄露无法像口令一样更换，所以「可撤销」是必要能力，不是加分项。
 
 ## 设计要点
 
-- **CPU 推理调优**：混合架构上用 `GetLogicalProcessorInformationEx` 找出 P 核并设置进程亲和性（E 核实测慢 4~5 倍），torch 线程封顶 8；检测前把长边缩到 640（人脸最终裁成 160×160，更高分辨率没有识别增益）。`bench_cpu_latency.py` 给出可复现的 p50/p95。
-- **活体状态机**：四个挑战每轮随机排序、每个挑战独立超时预算；微动判据第一帧只做基线，避免挑战排首位时"白送一分"；身份匹配通过后仍必须过活体，拦截照片/静态图像。
-- **线程模型**：摄像头单例 + 后台读帧线程 + 帧锁；识别放在 `QThread`，通过信号回主线程更新 UI。
-- **锁屏双层**：自定义无边框置顶窗口负责刷脸解锁，构建失败或用户主动要求时回退到 `LockWorkStation` 交给 Windows 安全桌面。
-- **凭据安全**：数据库口令只从环境变量 / `.env` 读取；口令用 PBKDF2-HMAC-SHA256 + 随机盐存储，历史明文口令在登录成功后自动逐行升级（无需停服刷库），同时幂等把 `password` 列从 `VARCHAR(20)` 扩到 `VARCHAR(255)`；特征串解析只用 `json` / `literal_eval` / 数值扫描，不执行数据库内容；SQL 全参数化。
+- **先做质量筛选再提特征**：MTCNN 先对齐出 160×160 人脸，再按清晰度/亮度/对比度/
+  姿态/占比打分；不合格的帧只花了检测与对齐的钱，不进 ResNet。所有评分都在对齐
+  后的人脸上计算，同一套阈值才能跨数据源比较。
+- **MTCNN 只推理一次**：用 `mtcnn.detect(..., landmarks=True)` 拿框和 5 点关键点，
+  `mtcnn.extract` 做对齐裁剪，同一次检测同时服务质量评估和特征提取。
+- **融合用中位数而不是均值**：均值会被一帧偶发脏特征拉偏；中位数在过半样本正确时
+  几乎不受影响，配合逐条 L2 归一化，输出仍是单位向量，可直接走余弦比对。
+- **活体必须放在身份匹配之后**：匹配只回答"像不像这个人"，照片也能匹配上；
+  解锁前再跑一次随机顺序的四步动作挑战，才真正区分真人与照片/视频。
+- **锁屏钩子按消息类型拦截**：键盘只拦能绕过锁屏的组合键，普通按键放行；
+  鼠标在锁屏期间全量吞掉——锁屏里没有可点控件，放行只会把焦点交给别的窗口。
+- **审计按时间节流**：检测线程每 3 秒重试一次，失败状态会重复出现，活体拦截
+  与不匹配日志分别做 30s / 60s 节流，避免刷爆日志表。
+- **CPU 推理调优**：`GetLogicalProcessorInformationEx` 找 P 核并设进程亲和性，
+  torch 线程封顶 8；检测前长边缩到 640。`bench_cpu_latency.py` 给出 p50/p95。
+- **凭据安全**：数据库口令只从环境变量 / `.env` 读取；口令用 PBKDF2-HMAC-SHA256 +
+  随机盐存储，历史明文在登录成功后自动逐行升级；特征串只用 `json` /
+  `literal_eval` / 数值扫描解析；SQL 全参数化。
+- **模板按版本分流**：`feature_codec.parse_template` 只认 `{"v":2}`，不是 v2 就
+  返回 None 交给旧余弦路径。升级不需要迁移历史数据，也不会把一条损坏的模板
+  误当成原始特征去比对。
 
 ## 已知限制
 
-- 仅 Windows 可运行，强依赖本机 MySQL、摄像头和随仓库附带的模型权重，面试官无法一键复现（建议配一段演示录屏）。
-- 模型全部是预训练调包，没有训练、微调或自采数据集；识别阈值 0.6 为经验值，**尚未测过 FAR/FRR**，活体也未做视频回放/面具攻击的实测。
-- UI 层仍残留少量直接 SQL（`enroll_face` / `view_logs` / 空闲检测等），分层不彻底；数据库连接未池化，异常提示仍以弹窗为主。
-- `userwindowpassword` 字段目前无业务使用，保留仅为兼容。
-- 演示材料待补：30 秒操作录屏、照片攻击被拦截的 GIF、benchmark 实测数值表。
+- **识别阈值 0.6 是保守取值**：LFW 协议下融合模板 FAR 0.22%、FRR 5.08%；换成
+  摄像头实拍分布仍应用 `--data-dir` 重新扫描阈值（`SECURITY_FACE_THRESHOLD` 可覆盖）。
+- **活体是规则判据**，对预录的高质量视频仍可能放行；`eval_liveness.py` 的输出
+  已如实写明这一点，不宣称防深度伪造。
+- **可撤销模板的种子与模板同库**，当前只做到「吊销 + 跨系统不可关联」，
+  不防库内反演；生产环境必须外置种子（TPM / DPAPI / KMS）后才算完整方案。
+- 仅 Windows 可运行终端部分；需要摄像头和随仓库附带的模型权重。
+- 打包版使用本机 SQLite，数据不跨机器同步；换机或删库后需要重新注册人脸。
+- UI 层仍残留少量直接 SQL，数据库连接未池化。
 
 ## 许可证与说明
 

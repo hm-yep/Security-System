@@ -10,6 +10,7 @@ import time
 import random
 from dataclasses import dataclass
 from facenet_pytorch import MTCNN, InceptionResnetV1
+from .face_quality import assess_face, fuse_features
 import math
 import numpy as np
 import os
@@ -205,17 +206,98 @@ def extract_face_feature(frame):
     从单帧图像中提取人脸特征向量。
     只使用 MTCNN，失败返回 None。
     """
+    sample = extract_face_sample(frame)
+    return sample[0] if sample is not None else None
+
+
+def extract_face_sample(frame, quality_gate=True):
+    """检测 + 质量门控 + 提特征，MTCNN 只跑一次。
+
+    返回 None 表示没检测到人脸；否则返回 (feature|None, QualityReport)。
+    feature 为 None 说明这一帧质量不过关（糊、暗、侧脸、太远），调用方应换下一帧。
+    quality_gate=False 时不做拒绝，专供评估脚本对比"有/无质量门控"的差异。
+    """
     rgb = cv2.cvtColor(fit_for_detection(frame), cv2.COLOR_BGR2RGB)
     try:
-        face_tensor = mtcnn(rgb)
-        if face_tensor is not None:
-            face_tensor = face_tensor.to(device)
-            with torch.no_grad():
-                feature = resnet(face_tensor.unsqueeze(0))[0].cpu().numpy()
-            return feature
+        boxes, probs, landmarks = mtcnn.detect(rgb, landmarks=True)
     except Exception as e:
         print(f"[特征提取] MTCNN 出错: {e}")
-    return None
+        return None
+    if boxes is None or len(boxes) == 0:
+        return None
+
+    index = int(np.argmax(probs)) if probs is not None else 0
+    box = boxes[index]
+    points = landmarks[index] if landmarks is not None else None
+    height, width = rgb.shape[:2]
+
+    try:
+        face_tensor = mtcnn.extract(rgb, np.asarray([box], dtype=np.float32), None)
+        if face_tensor is None:
+            return None
+        #: keep_all=False 时 extract 返回 (3,H,W)，补一维 batch 再送 ResNet
+        if face_tensor.ndim == 3:
+            face_tensor = face_tensor.unsqueeze(0)
+
+        #: 质量评分统一在 MTCNN 对齐后的 160×160 人脸上做：不同来源的画面尺寸
+        #: 差异很大（LFW 90px、摄像头 300px），在原始裁剪上算 Laplacian 方差
+        #: 会让同一阈值在不同数据集上含义完全不同。
+        aligned = face_tensor[0].permute(1, 2, 0).numpy() * 128.0 + 127.5
+        aligned = np.clip(aligned, 0, 255).astype(np.uint8)
+        report = assess_face(aligned, box=box, landmarks=points, frame_shape=(height, width))
+        if quality_gate and not report.passed:
+            return None, report
+
+        face_tensor = face_tensor.to(device)
+        with torch.no_grad():
+            feature = resnet(face_tensor)[0].cpu().numpy()
+    except Exception as e:
+        print(f"[特征提取] 提特征失败: {e}")
+        return None
+    return feature, report
+
+
+#: 注册/登录采集的帧数与最短时间预算。间隔 50ms 是为了拿到真正不同的帧，
+#: 而不是同一帧被重复计入融合。
+FUSION_SAMPLES = 8
+FUSION_MIN_SAMPLES = 4
+FUSION_TIMEOUT = 8.0
+
+
+def collect_fusion_feature(camera, samples=FUSION_SAMPLES, min_samples=FUSION_MIN_SAMPLES,
+                           timeout=FUSION_TIMEOUT, frontal=True, on_reject=None):
+    """在摄像头上采集多帧通过质量门控的特征并融合。
+
+    frontal=True 时额外要求近似正脸（yaw/roll 比质量门槛更严），避免把注册样本
+    采成侧脸。返回 (融合特征|None, 有效帧数)。
+    """
+    captured = []
+    deadline = time.time() + timeout
+    while time.time() < deadline and len(captured) < samples:
+        frame = camera.getframe()
+        if frame is None:
+            time.sleep(0.01)
+            continue
+        sample = extract_face_sample(frame)
+        if sample is None:
+            continue
+        feature, report = sample
+        if feature is None:
+            if on_reject is not None:
+                on_reject(report)
+            time.sleep(0.05)
+            continue
+        if frontal and (report.yaw > 20 or report.roll > 15):
+            if on_reject is not None:
+                on_reject(report)
+            time.sleep(0.05)
+            continue
+        captured.append(feature)
+        time.sleep(0.05)
+
+    if len(captured) < min_samples:
+        return None, len(captured)
+    return fuse_features(captured), len(captured)
 
 
 def landmarks_from_frame(frame):
@@ -346,27 +428,16 @@ class simple_login_facedetector():
         else:
             self.facedetector = None
 
-        start_time = time.time()
         max_duration = 10.0
-
-        while time.time() - start_time < max_duration:
-            frame = camera.getframe()
-            if frame is None:
-                continue
-
-            feature = extract_face_feature(frame)
-            if feature is not None:
-                print("[简化登录] 成功提取人脸特征")
-                if own_camera:
-                    camera.release()
-                return True, feature
-            else:
-                if int(time.time() * 2) % 3 == 0:
-                    print("[简化登录] 未检测到人脸")
+        feature, count = collect_fusion_feature(camera, timeout=max_duration)
 
         if own_camera:
             camera.release()
-        print("[简化登录] 超时未检测到人脸")
+
+        if feature is not None:
+            print(f"[简化登录] 融合 {count} 帧通过质量门控的人脸特征")
+            return True, feature
+        print(f"[简化登录] 超时或人脸质量不足（有效帧 {count}）")
         return False, None
 
 
@@ -531,48 +602,16 @@ class register_face_detector():
     def hand_in(self, is_auto):
         if not self.facedetector or not self.facedetector.ifcamera:
             return None
-        global _timestamp_counter
-        userface = None
-        seconds = 0
-        while True:
-            frame = self.facedetector.get_frame()
-            if frame is None:
-                continue
-            frame = fit_for_detection(frame)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            face_tensor = mtcnn(rgb)
-            if face_tensor is None:
-                continue
-            face_tensor = face_tensor.to(device)
-            with torch.no_grad():
-                feature = resnet(face_tensor.unsqueeze(0))[0].cpu().numpy()
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            _timestamp_counter += 10
-            detection_result = landmarker.detect_for_video(mp_image, _timestamp_counter)
-            if not detection_result.face_landmarks:
-                continue
-            landmarks = detection_result.face_landmarks[0]
-            threshold = 60
-            nose_tip = landmarks[1]
-            left_eye_outer = landmarks[33]
-            right_eye_outer = landmarks[133]
-            eye_center_x = (left_eye_outer.x + right_eye_outer.x) / 2.0
-            dx = nose_tip.x - eye_center_x
-            width = abs(right_eye_outer.x - left_eye_outer.x)
-            yaw_angle = abs(dx) / (width + 1e-6) * 60
-            is_frontal = yaw_angle < threshold
-            if is_frontal:
-                userface = feature
-                break
-            seconds += 1
-            if seconds == 100:
-                seconds = 0
-                self.facedetector.show_auto_close_message("请摆出正脸", 2000)
-            if not is_auto:
-                cv2.imshow("", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-        return userface
+        feature, count = collect_fusion_feature(
+            self.facedetector.camera, samples=10, min_samples=4, timeout=8.0
+        )
+        if feature is not None:
+            print(f"[注册] 融合 {count} 帧通过质量门控的人脸特征")
+            return feature
+        self.facedetector.show_auto_close_message(
+            "人脸质量不足，请保持正脸、光线充足并靠近镜头", 2500
+        )
+        return None
 
 
 def run_liveness(camera, prompt=None, timeout=8.0, challenges=None, landmark_provider=None):

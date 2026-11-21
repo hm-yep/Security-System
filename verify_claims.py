@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 import time
 from pathlib import Path
@@ -232,13 +233,18 @@ def system_checks():
     check("鼠标移动也拦", InputGuard.should_block_mouse(0x0200))
     check("未知消息不误伤", not InputGuard.should_block_mouse(0x00FF))
 
-    guard = InputGuard()
-    installed = guard.start()
-    check("低级键鼠钩子能真实装上",
-          installed and guard._keyboard_hook and guard._mouse_hook,
-          f"keyboard={bool(guard._keyboard_hook)} mouse={bool(guard._mouse_hook)}")
-    guard.stop()
-    check("摘钩子后两个句柄都清空", not guard._keyboard_hook and not guard._mouse_hook)
+    #: 真装钩子会抢占本机输入，CI / 无人值守环境默认只做静态核对。
+    #: 本机实机验收需显式设置 SECURITY_TEST_HOOK=1。
+    if os.getenv("SECURITY_TEST_HOOK") == "1":
+        guard = InputGuard()
+        installed = guard.start()
+        check("低级键鼠钩子能真实装上",
+              installed and guard._keyboard_hook and guard._mouse_hook,
+              f"keyboard={bool(guard._keyboard_hook)} mouse={bool(guard._mouse_hook)}")
+        guard.stop()
+        check("摘钩子后两个句柄都清空", not guard._keyboard_hook and not guard._mouse_hook)
+    else:
+        print("  SKIP  键鼠钩子实装（设 SECURITY_TEST_HOOK=1 开启，CI 默认跳过）")
 
     check("锁屏窗口吞掉按键事件", "accept()" in inspect.getsource(Lockscreen.keyPressEvent))
     check("锁屏期间拒绝关窗", "ignore()" in inspect.getsource(Lockscreen.closeEvent))

@@ -7,10 +7,16 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DOTENV = ROOT / ".env"
+# 打包后 __file__ 在临时解压目录里，.env 应放在 exe 同目录才找得到。
+DEFAULT_DOTENV = (
+    Path(sys.executable).resolve().parent / ".env"
+    if getattr(sys, "frozen", False)
+    else ROOT / ".env"
+)
 
 
 def load_dotenv(path: Path | None = None) -> None:

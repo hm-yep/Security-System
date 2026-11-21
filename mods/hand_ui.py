@@ -3,15 +3,17 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QMessageBox, QFrame,
     QGraphicsDropShadowEffect, QApplication, QDialog,
-    QSystemTrayIcon, QMenu, QAction
+    QSystemTrayIcon, QMenu, QAction, QGridLayout
 )
 from PyQt5.QtCore import Qt, QPropertyAnimation, QEasingCurve, QTimer
 from PyQt5.QtGui import QColor, QIcon
 from .database import package
-from .feature_codec import serialize_feature, parse_feature as decode_feature
+from .feature_codec import serialize_template
+from .matching import match_feature
 from .face_detector import auto_hand_controller, mtcnn, resnet, device
 from .startup_manager import is_startup_enabled, enable_startup, disable_startup
 from .camera import camera_process
+from .ui_icons import ACCENT, DANGER, MUTED, SUCCESS, WARNING, make_icon, render_pixmap
 import ctypes
 from ctypes import wintypes
 import time
@@ -179,8 +181,10 @@ class ConfirmDialog(QDialog):
         layout.setSpacing(20)
         layout.setContentsMargins(30, 25, 30, 25)
         msg_layout = QHBoxLayout()
-        icon_label = QLabel("⚠️" if icon_type == "warning" else "❓")
-        icon_label.setStyleSheet("font-size: 32px;")
+        icon_name = "warning" if icon_type in ("warning", "danger") else "info"
+        icon_color = DANGER if icon_type == "danger" else (WARNING if icon_type == "warning" else ACCENT)
+        icon_label = QLabel()
+        icon_label.setPixmap(render_pixmap(icon_name, icon_color, 30))
         msg_layout.addWidget(icon_label)
         msg_label = QLabel(message)
         msg_label.setWordWrap(True)
@@ -206,58 +210,108 @@ class ConfirmDialog(QDialog):
 
 LOGI_STYLE = """
 QWidget {
-    background-color: #0d0d1a;
-    color: #e8edf5;
+    color: #e6eefc;
     font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
 }
+QWidget#appRoot, QDialog {
+    background-color: #070b14;
+}
 QFrame#card {
-    background-color: #16162e;
-    border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.04);
+    background-color: #0f1728;
+    border-radius: 14px;
+    border: 1px solid rgba(56, 189, 248, 0.08);
 }
 QFrame#card:hover {
-    background-color: #1e1e3a;
-    border-color: rgba(255, 255, 255, 0.08);
+    background-color: #131d33;
+    border-color: rgba(56, 189, 248, 0.28);
+}
+QFrame#brandTile, QFrame#heroIconTile {
+    background-color: rgba(56, 189, 248, 0.10);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    border-radius: 12px;
+}
+QFrame#iconTile {
+    background-color: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.14);
+    border-radius: 12px;
+}
+QFrame#statTile {
+    background-color: #0d1524;
+    border: 1px solid rgba(56, 189, 248, 0.10);
+    border-radius: 14px;
+}
+QFrame#heroCard {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0e1a2e, stop:1 #0a1322);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    border-radius: 18px;
+}
+QFrame#statusChip {
+    background-color: rgba(52, 211, 153, 0.08);
+    border: 1px solid rgba(52, 211, 153, 0.20);
+    border-radius: 14px;
 }
 QLineEdit {
-    background-color: #1a1a32;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    background-color: #0b1322;
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 10px;
     padding: 12px 16px;
-    color: #e8edf5;
+    color: #e6eefc;
     font-size: 14px;
 }
-QLineEdit:focus { border-color: #4a9eff; background-color: #1e1e3a; }
-QLineEdit:hover { border-color: rgba(255, 255, 255, 0.12); }
+QLineEdit:focus { border-color: #38bdf8; background-color: #0f1a2c; }
+QLineEdit:hover { border-color: rgba(255, 255, 255, 0.14); }
 QPushButton#primaryBtn {
-    background-color: #4a9eff; color: #ffffff; font-weight: 600;
+    background-color: #38bdf8; color: #04121f; font-weight: 700;
     border: none; border-radius: 10px; padding: 12px 28px; font-size: 14px;
 }
-QPushButton#primaryBtn:hover { background-color: #5aaeff; }
-QPushButton#primaryBtn:pressed { background-color: #3a8eef; }
+QPushButton#primaryBtn:hover { background-color: #5ac8fa; }
+QPushButton#primaryBtn:pressed { background-color: #22a8e8; }
 QPushButton#secondaryBtn {
     background-color: transparent;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 10px; padding: 12px 28px;
-    color: #aab8d0; font-size: 14px;
+    color: #a8b8cf; font-size: 14px;
 }
 QPushButton#secondaryBtn:hover {
-    background-color: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.18);
+    background-color: rgba(56, 189, 248, 0.06);
+    border-color: rgba(56, 189, 248, 0.28);
     color: #ffffff;
 }
-QLabel#titleLabel { font-size: 28px; font-weight: 300; color: #ffffff; }
-QLabel#subtitleLabel { font-size: 14px; color: rgba(255, 255, 255, 0.35); }
-QLabel#greetingLabel { font-size: 32px; font-weight: 300; color: #ffffff; }
-QLabel#statusLabel { font-size: 14px; color: #4a9eff; }
-QLabel#cardTitle { font-size: 15px; font-weight: 600; color: #ffffff; }
-QLabel#cardDesc { font-size: 13px; color: rgba(255, 255, 255, 0.35); }
+QPushButton#runBtn {
+    background-color: #38bdf8; color: #04121f; border: none;
+    border-radius: 10px; padding: 10px 20px; font-size: 14px; font-weight: 700;
+}
+QPushButton#runBtn:hover { background-color: #5ac8fa; }
+QPushButton#runBtn:pressed { background-color: #22a8e8; }
+QPushButton#iconBtn {
+    background-color: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+}
+QPushButton#iconBtn:hover {
+    background-color: rgba(56, 189, 248, 0.10);
+    border-color: rgba(56, 189, 248, 0.30);
+}
+QLabel#titleLabel { font-size: 28px; font-weight: 600; color: #ffffff; }
+QLabel#subtitleLabel { font-size: 13px; color: #5f7189; }
+QLabel#greetingLabel { font-size: 26px; font-weight: 600; color: #ffffff; }
+QLabel#statusLabel { font-size: 13px; color: #34d399; }
+QLabel#cardTitle { font-size: 14px; font-weight: 600; color: #ffffff; }
+QLabel#cardDesc { font-size: 12px; color: #7c8ba1; }
+QLabel#brandTitle { font-size: 19px; font-weight: 600; color: #ffffff; }
+QLabel#brandSub { font-size: 10px; color: #5f7189; }
+QLabel#statValue { font-size: 24px; font-weight: 600; color: #ffffff; }
+QLabel#statLabel { font-size: 11px; color: #7c8ba1; }
+QLabel#sectionLabel { font-size: 12px; color: #5f7189; font-weight: 600; }
+QLabel#heroTitle { font-size: 18px; font-weight: 600; color: #ffffff; }
+QLabel#heroDesc { font-size: 12px; color: #7c8ba1; }
 """
 
 
 class loginwindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("appRoot")
         self.setWindowTitle("Security System")
         self.resize(520, 650)
         self.setMinimumSize(420, 550)
@@ -267,12 +321,19 @@ class loginwindow(QWidget):
         main_layout.setContentsMargins(50, 60, 50, 50)
         main_layout.setSpacing(0)
 
-        title = QLabel("🔐 Security System")
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
+        mark = QLabel()
+        mark.setPixmap(render_pixmap("target", ACCENT, 30))
+        title = QLabel("人脸安防终端")
         title.setObjectName("titleLabel")
-        title.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(title)
+        brand.addStretch()
+        brand.addWidget(mark)
+        brand.addWidget(title)
+        brand.addStretch()
+        main_layout.addLayout(brand)
 
-        subtitle = QLabel("人脸识别安全登录")
+        subtitle = QLabel("人脸识别 · 活体检测 · 安全登录")
         subtitle.setObjectName("subtitleLabel")
         subtitle.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(subtitle)
@@ -308,9 +369,11 @@ class loginwindow(QWidget):
         self.btn_login = QPushButton("登 录")
         self.btn_login.setObjectName("primaryBtn")
         self.btn_login.setFixedHeight(50)
+        self.btn_login.setIcon(make_icon("key", "#04121f", 18))
         self.btn_register = QPushButton("注 册")
         self.btn_register.setObjectName("secondaryBtn")
         self.btn_register.setFixedHeight(50)
+        self.btn_register.setIcon(make_icon("user", MUTED, 18))
 
         btn_layout.addWidget(self.btn_login)
         btn_layout.addWidget(self.btn_register)
@@ -367,6 +430,7 @@ class loginwindow(QWidget):
 class registerwindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("appRoot")
         self.setWindowTitle("Security System Register UI")
         self.resize(520, 650)
         self.setMinimumSize(420, 550)
@@ -376,10 +440,17 @@ class registerwindow(QWidget):
         main_layout.setContentsMargins(50, 60, 50, 50)
         main_layout.setSpacing(0)
 
-        title = QLabel("📝 注册新账号")
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
+        mark = QLabel()
+        mark.setPixmap(render_pixmap("user", ACCENT, 28))
+        title = QLabel("注册新账户")
         title.setObjectName("titleLabel")
-        title.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(title)
+        brand.addStretch()
+        brand.addWidget(mark)
+        brand.addWidget(title)
+        brand.addStretch()
+        main_layout.addLayout(brand)
 
         subtitle = QLabel("填写信息并完成人脸采集")
         subtitle.setObjectName("subtitleLabel")
@@ -416,8 +487,8 @@ class registerwindow(QWidget):
         self.btn_register.setObjectName("primaryBtn")
         self.btn_register.setFixedHeight(50)
 
-        hint = QLabel("💡 注册将采集人脸信息用于身份验证")
-        hint.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 13px;")
+        hint = QLabel("注册将采集人脸信息用于身份验证")
+        hint.setStyleSheet("color: #5f7189; font-size: 12px;")
         hint.setAlignment(Qt.AlignCenter)
 
         card_layout.addWidget(lbl_user)
@@ -460,7 +531,7 @@ class registerwindow(QWidget):
             return
 
         try:
-            face_json = serialize_feature(userfaceinfo)
+            face_json = serialize_template(userfaceinfo)
             pkg.getinfo(username, password, face_json, 0)
             pkg.insertdatalog(f"新用户 {username} 注册成功", username, None)
             QMessageBox.information(self, "成功", "注册成功！")
@@ -483,6 +554,7 @@ class mainwindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.username = UN
+        self.setObjectName("appRoot")
         self.setWindowTitle("Security_System - 个人中心")
         self.resize(1100, 750)
         self.setMinimumSize(900, 650)
@@ -495,66 +567,48 @@ class mainwindow(QWidget):
         self.lock_screen_active = False
         self.lock_screen_window = None
 
+        self._stat_values = []
         main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(70, 55, 70, 55)
-        main_layout.setSpacing(35)
+        main_layout.setContentsMargins(40, 32, 40, 32)
+        main_layout.setSpacing(20)
 
-        top_layout = QHBoxLayout()
-        top_layout.setSpacing(0)
+        main_layout.addLayout(self._build_header())
+        main_layout.addLayout(self._build_stats())
+        main_layout.addWidget(self._build_hero())
 
-        greeting_layout = QVBoxLayout()
-        greeting_layout.setSpacing(4)
-        greeting = QLabel(f"下午好，{self.username}")
-        greeting.setObjectName("greetingLabel")
-        greeting_layout.addWidget(greeting)
-        status = QLabel("✅ 安全监控已开启")
-        status.setObjectName("statusLabel")
-        greeting_layout.addWidget(status)
+        main_layout.addWidget(self._section_title("身份与安全"))
+        identity_grid = QGridLayout()
+        identity_grid.setSpacing(14)
+        identity_items = (
+            ("user", "录入人脸信息", "首次录入人脸信息"),
+            ("camera", "更换人脸信息", "重新采集人脸信息"),
+            ("key", "修改密码", "更新当前登录密码"),
+            ("clipboard", "获取操作日志", "查看所有操作记录"),
+            ("users", "切换账户", "切换到其他用户"),
+            ("trash", "注销账户", "永久删除当前账户"),
+        )
+        for index, (icon, title, desc) in enumerate(identity_items):
+            identity_grid.addWidget(
+                self.create_card(icon, title, desc), index // 2, index % 2
+            )
+        main_layout.addLayout(identity_grid)
 
-        top_layout.addLayout(greeting_layout)
-        top_layout.addStretch()
+        main_layout.addWidget(self._section_title("系统"))
+        system_grid = QGridLayout()
+        system_grid.setSpacing(14)
+        system_grid.addWidget(
+            self.create_card("sliders", "开机自启动", "设置是否开机自动运行"), 0, 0
+        )
+        system_grid.addWidget(
+            self.create_card("lock", "立即锁屏", "手动锁定系统（人脸解锁）"), 0, 1
+        )
+        main_layout.addLayout(system_grid)
 
-        self.btn_exit = QPushButton("✕ 退出程序")
-        self.btn_exit.setObjectName("secondaryBtn")
-        self.btn_exit.setFixedHeight(50)
-        self.btn_exit.setFixedWidth(150)
-        top_layout.addWidget(self.btn_exit)
-
-        main_layout.addLayout(top_layout)
-
-        grid_layout = QVBoxLayout()
-        grid_layout.setSpacing(18)
-
-        row1 = QHBoxLayout()
-        row1.setSpacing(18)
-        row1.addWidget(self.create_card("🔑", "修改密码", "更新当前登录密码"))
-        row1.addWidget(self.create_card("📋", "获取操作日志", "查看所有操作记录"))
-        grid_layout.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(18)
-        row2.addWidget(self.create_card("📸", "录入人脸信息", "首次录入人脸信息"))
-        row2.addWidget(self.create_card("🔄", "更换人脸信息", "重新采集人脸信息"))
-        grid_layout.addLayout(row2)
-
-        row3 = QHBoxLayout()
-        row3.setSpacing(18)
-        row3.addWidget(self.create_card("🔄", "切换账户", "切换到其他用户"))
-        row3.addWidget(self.create_card("🗑️", "注销账户", "永久删除当前账户"))
-        grid_layout.addLayout(row3)
-
-        row4 = QHBoxLayout()
-        row4.setSpacing(18)
-        row4.addWidget(self.create_card("⚙️", "开机自启动", "设置是否开机自动运行"))
-        row4.addWidget(self.create_card("🔒", "立即锁屏", "手动锁定系统（人脸解锁）"))
-        grid_layout.addLayout(row4)
-
-        main_layout.addLayout(grid_layout)
         main_layout.addStretch()
         self.setLayout(main_layout)
 
-        self.btn_exit.clicked.connect(self.close)
-
+        #: 空闲检测与快速锁屏原来挂在已移除的入口里，现在必须在主界面构造时启动，
+        #: 否则主界面显示期间锁屏保护不会生效。
         self.idle_timer = QTimer(self)
         self.idle_timer.timeout.connect(self.check_idle_and_scan)
         self.idle_timer.start(5000)
@@ -566,25 +620,184 @@ class mainwindow(QWidget):
         self.quick_lock_triggered = False
         QTimer.singleShot(3500, self.start_quick_lock_check)
 
+    # ---------- 主界面组件 ----------
+    def _build_header(self):
+        header = QHBoxLayout()
+        header.setSpacing(14)
+
+        tile = QFrame()
+        tile.setObjectName("brandTile")
+        tile.setFixedSize(46, 46)
+        tile_layout = QHBoxLayout(tile)
+        tile_layout.setContentsMargins(0, 0, 0, 0)
+        mark = QLabel()
+        mark.setPixmap(render_pixmap("target", ACCENT, 26))
+        tile_layout.addWidget(mark, 0, Qt.AlignCenter)
+        header.addWidget(tile)
+
+        brand = QVBoxLayout()
+        brand.setSpacing(2)
+        title = QLabel("人脸安防系统")
+        title.setObjectName("brandTitle")
+        subtitle = QLabel("FACE SECURITY TERMINAL")
+        subtitle.setObjectName("brandSub")
+        brand.addWidget(title)
+        brand.addWidget(subtitle)
+        header.addLayout(brand)
+        header.addStretch()
+
+        chip = QFrame()
+        chip.setObjectName("statusChip")
+        chip_layout = QHBoxLayout(chip)
+        chip_layout.setContentsMargins(12, 6, 14, 6)
+        chip_layout.setSpacing(8)
+        dot = QLabel()
+        dot.setPixmap(render_pixmap("activity", SUCCESS, 16))
+        chip_layout.addWidget(dot)
+        chip_text = QLabel("系统在线")
+        chip_text.setStyleSheet(f"color: {SUCCESS}; font-size: 12px; font-weight: 600;")
+        chip_layout.addWidget(chip_text)
+        header.addWidget(chip)
+
+        self.btn_exit = QPushButton()
+        self.btn_exit.setObjectName("iconBtn")
+        self.btn_exit.setIcon(make_icon("power", MUTED, 20))
+        self.btn_exit.setFixedSize(40, 40)
+        self.btn_exit.setToolTip("退出程序")
+        self.btn_exit.clicked.connect(self.quit_application)
+        header.addWidget(self.btn_exit)
+        return header
+
+    def _build_stats(self):
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        for icon, value, label in (
+            ("check", self.today_count(("人脸解锁成功",)), "今日人脸解锁"),
+            ("shield", self.today_count(("活体拦截",)), "活体拦截"),
+            ("warning", self.today_count(("陌生人",)), "陌生人告警"),
+        ):
+            row.addWidget(self._stat_tile(icon, value, label))
+        return row
+
+    def today_count(self, keywords):
+        """从审计日志统计今日安全事件；数据库不可用时显示占位符。"""
+        try:
+            pkg = package()
+            if not pkg.ready:
+                return "—"
+            count = pkg.count_today_logs(keywords)
+            pkg.close()
+        except Exception:
+            return "—"
+        return "—" if count is None else str(count)
+
+    def _stat_tile(self, icon, value, label):
+        frame = QFrame()
+        frame.setObjectName("statTile")
+        frame.setFixedHeight(84)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(14)
+
+        icon_label = QLabel()
+        icon_label.setPixmap(render_pixmap(icon, ACCENT, 24))
+        layout.addWidget(icon_label)
+
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        value_label = QLabel(value)
+        value_label.setObjectName("statValue")
+        text_label = QLabel(label)
+        text_label.setObjectName("statLabel")
+        column.addWidget(value_label)
+        column.addWidget(text_label)
+        layout.addLayout(column, 1)
+        layout.addStretch()
+
+        self._stat_values.append(value_label)
+        return frame
+
+    def refresh_stats(self):
+        values = (
+            self.today_count(("人脸解锁成功",)),
+            self.today_count(("活体拦截",)),
+            self.today_count(("陌生人",)),
+        )
+        for label, value in zip(self._stat_values, values):
+            label.setText(value)
+
+    def showEvent(self, event):
+        """锁屏解锁后主窗口重新显示，顺手刷新一次今日安全统计。"""
+        super().showEvent(event)
+        if self._stat_values:
+            QTimer.singleShot(0, self.refresh_stats)
+
+    def _section_title(self, text):
+        label = QLabel(text)
+        label.setObjectName("sectionLabel")
+        return label
+
+    def _build_hero(self):
+        card = QFrame()
+        card.setObjectName("heroCard")
+        card.setFixedHeight(124)
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(26, 22, 26, 22)
+        layout.setSpacing(20)
+
+        tile = QFrame()
+        tile.setObjectName("heroIconTile")
+        tile.setFixedSize(72, 72)
+        tile_layout = QHBoxLayout(tile)
+        tile_layout.setContentsMargins(0, 0, 0, 0)
+        icon = QLabel()
+        icon.setPixmap(render_pixmap("scan", ACCENT, 36))
+        tile_layout.addWidget(icon, 0, Qt.AlignCenter)
+        layout.addWidget(tile)
+
+        text = QVBoxLayout()
+        text.setSpacing(4)
+        title = QLabel("人脸识别与活体防护")
+        title.setObjectName("heroTitle")
+        desc = QLabel("MTCNN 检测 · 512 维特征比对 · 四步随机活体挑战 · 陌生人停留告警")
+        desc.setObjectName("heroDesc")
+        text.addWidget(title)
+        text.addWidget(desc)
+        layout.addLayout(text)
+        layout.addStretch()
+
+        button = QPushButton("锁屏验证")
+        button.setObjectName("runBtn")
+        button.setFixedHeight(44)
+        button.setMinimumWidth(140)
+        button.setIcon(make_icon("lock", "#04121f", 18))
+        button.clicked.connect(self.manual_lock)
+        layout.addWidget(button)
+        return card
+
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon('logo/logo.png'))
         tray_menu = QMenu()
-        show_action = QAction("🖥️ 显示主窗口", self)
+        show_action = QAction(make_icon("image", MUTED, 16), "显示主窗口", self)
         show_action.triggered.connect(self.show_main_window)
         tray_menu.addAction(show_action)
         tray_menu.addSeparator()
-        self.auto_start_action = QAction("🔓 开机自启动", self)
+        self.auto_start_action = QAction(
+            make_icon("sliders", MUTED, 16), "开机自启动", self
+        )
         self.auto_start_action.setCheckable(True)
         self.auto_start_action.setChecked(is_startup_enabled())
         self.auto_start_action.triggered.connect(self.toggle_auto_start)
         tray_menu.addAction(self.auto_start_action)
         tray_menu.addSeparator()
-        lock_action = QAction("🔒 系统锁屏（Windows API）", self)
+        lock_action = QAction(
+            make_icon("lock", MUTED, 16), "系统锁屏（Windows API）", self
+        )
         lock_action.triggered.connect(lambda: self.lock_workstation())
         tray_menu.addAction(lock_action)
         tray_menu.addSeparator()
-        exit_action = QAction("✕ 退出程序", self)
+        exit_action = QAction(make_icon("power", MUTED, 16), "退出程序", self)
         exit_action.triggered.connect(self.exit_application)
         tray_menu.addAction(exit_action)
         self.tray_icon.setContextMenu(tray_menu)
@@ -632,20 +845,37 @@ class mainwindow(QWidget):
             self.tray_icon.hide()
         QApplication.quit()
 
+    def quit_application(self):
+        """顶栏电源键：真正退出应用，而不是最小化到托盘。"""
+        if self.tray_icon:
+            self.tray_icon.hide()
+        self.close()
+
     def create_card(self, icon, title, desc):
         card = QFrame()
         card.setObjectName("card")
-        card.setFixedHeight(120)
+        card.setFixedHeight(92)
+        card.setCursor(Qt.PointingHandCursor)
+        card.setAttribute(Qt.WA_Hover, True)
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(20)
         shadow.setOffset(0, 4)
         shadow.setColor(QColor(0, 0, 0, 40))
         card.setGraphicsEffect(shadow)
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(18)
-        icon_lbl = QLabel(icon)
-        icon_lbl.setStyleSheet("font-size: 30px;")
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(14)
+
+        tile = QFrame()
+        tile.setObjectName("iconTile")
+        tile.setFixedSize(46, 46)
+        tile_layout = QHBoxLayout(tile)
+        tile_layout.setContentsMargins(0, 0, 0, 0)
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(render_pixmap(icon, ACCENT, 22))
+        tile_layout.addWidget(icon_lbl, 0, Qt.AlignCenter)
+        layout.addWidget(tile)
+
         text_layout = QVBoxLayout()
         text_layout.setSpacing(2)
         title_lbl = QLabel(title)
@@ -654,10 +884,10 @@ class mainwindow(QWidget):
         desc_lbl.setObjectName("cardDesc")
         text_layout.addWidget(title_lbl)
         text_layout.addWidget(desc_lbl)
-        arrow = QLabel("›")
-        arrow.setStyleSheet("font-size: 26px; color: rgba(255,255,255,0.08);")
-        layout.addWidget(icon_lbl)
         layout.addLayout(text_layout, 1)
+
+        arrow = QLabel()
+        arrow.setPixmap(render_pixmap("chevron", MUTED, 16))
         layout.addWidget(arrow)
         card.mousePressEvent = lambda e: self.on_card_clicked(title)
         return card
@@ -769,8 +999,11 @@ class mainwindow(QWidget):
         top_layout = QHBoxLayout()
         top_layout.setSpacing(0)
         left_layout = QHBoxLayout()
-        left_layout.setSpacing(15)
-        title_label = QLabel("📋 操作日志")
+        left_layout.setSpacing(10)
+        log_icon = QLabel()
+        log_icon.setPixmap(render_pixmap("clipboard", ACCENT, 22))
+        left_layout.addWidget(log_icon)
+        title_label = QLabel("操作日志")
         title_label.setObjectName("titleLabel")
         left_layout.addWidget(title_label)
         count_badge = QFrame()
@@ -788,9 +1021,10 @@ class mainwindow(QWidget):
         left_layout.addWidget(count_badge)
         top_layout.addLayout(left_layout)
         top_layout.addStretch()
-        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn = QPushButton("刷新")
         refresh_btn.setObjectName("refreshBtn")
         refresh_btn.setFixedHeight(34)
+        refresh_btn.setIcon(make_icon("refresh", ACCENT, 16))
         top_layout.addWidget(refresh_btn)
         main_layout.addLayout(top_layout)
         table = QTableWidget()
@@ -853,11 +1087,10 @@ class mainwindow(QWidget):
             return
         try:
             pkg = package()
-            sql = "UPDATE userinfo SET userfaceinfo = %s WHERE username = %s"
-            face_json = serialize_feature(faceinfo)
-            pkg.cursor.execute(sql, (face_json, self.username))
-            pkg.conn.commit()
-            pkg.insertdatalog(f"用户 {self.username} 录入了人脸信息", self.username, None)
+            face_json = serialize_template(faceinfo)
+            if not pkg.update_face_feature(self.username, face_json):
+                raise RuntimeError("人脸信息写入数据库失败")
+            pkg.insertdatalog(f"用户 {self.username} 录入了人脸模板（可撤销）", self.username, None)
             QMessageBox.information(self, "成功", "人脸信息录入成功！")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"保存失败: {e}")
@@ -879,11 +1112,10 @@ class mainwindow(QWidget):
             return
         try:
             pkg = package()
-            sql = "UPDATE userinfo SET userfaceinfo = %s WHERE username = %s"
-            face_json = serialize_feature(faceinfo)
-            pkg.cursor.execute(sql, (face_json, self.username))
-            pkg.conn.commit()
-            pkg.insertdatalog(f"用户 {self.username} 更换了人脸信息", self.username, None)
+            face_json = serialize_template(faceinfo)
+            if not pkg.update_face_feature(self.username, face_json):
+                raise RuntimeError("人脸信息写入数据库失败")
+            pkg.insertdatalog(f"用户 {self.username} 轮换了人脸模板（旧模板已作废）", self.username, None)
             QMessageBox.information(self, "成功", "人脸信息更换成功！")
         except Exception as e:
             QMessageBox.warning(self, "错误", f"保存失败: {e}")
@@ -916,9 +1148,8 @@ class mainwindow(QWidget):
             pkg = package()
             pkg.insertdatalog(f"用户 {self.username} 注销了账户", self.username, None)
             pkg.clear_current_user()
-            sql = "DELETE FROM userinfo WHERE username = %s"
-            pkg.cursor.execute(sql, (self.username,))
-            pkg.conn.commit()
+            if not pkg.delete_user(self.username):
+                raise RuntimeError("数据库删除失败")
             QMessageBox.information(self, "成功", f"账户「{self.username}」已成功注销")
             self.close()
             self.login_win = loginwindow()
@@ -1018,17 +1249,10 @@ class mainwindow(QWidget):
         if current_user is None:
             current_user = self.username
         try:
-            sql = "SELECT userfaceinfo FROM userinfo WHERE username = %s"
-            pkg.cursor.execute(sql, (current_user,))
-            result = pkg.cursor.fetchone()
-            if result and result['userfaceinfo']:
-                stored_feat = decode_feature(result['userfaceinfo'])
-                if stored_feat is None:
-                    raise ValueError("库里的特征格式无法解析")
-                sim = np.dot(feature, stored_feat) / (
-                    np.linalg.norm(feature) * np.linalg.norm(stored_feat) + 1e-6
-                )
-                if sim > 0.6:
+            stored_text = pkg.get_face_feature(current_user)
+            if stored_text:
+                _sim, passed = match_feature(stored_text, feature)
+                if passed:
                     self.idle_check_pending = False
                     pkg.insertdatalog(f"空闲检测：用户 {current_user} 验证通过", current_user)
                     return
